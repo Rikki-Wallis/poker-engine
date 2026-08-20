@@ -1,17 +1,17 @@
 // cards, deck, hand evaluator
 use rand::{RngExt, SeedableRng};
 use rand::rngs::StdRng;
+use std::collections::HashMap;
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Rank {
+pub enum Rank {
     Two, Three, Four, Five, Six, Seven, Eight, Nine, Ten, Jack, Queen, King, Ace
 }
 
-
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Suit {
+pub enum Suit {
     Clubs, Diamonds, Hearts, Spades
 }
 
@@ -34,18 +34,34 @@ enum Action {
     Check
 }
 
+#[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum HandType {
+    HighCard,
+    Pair,
+    TwoPair,
+    Trips,
+    Straight,
+    Flush,
+    FullHouse,
+    Quads,
+    StraightFlush,
+    RoyalFlush
+}
 
-struct Card(u8);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Card(u8);
 impl Card {
     fn new(rank: Rank, suit: Suit) -> Self {
         Self(((rank as u8) << 2) | (suit as u8))
     }
 
-    fn rank(&self) -> u8 {
+    pub fn rank(&self) -> u8 {
         self.0 >> 2
     }
 
-    fn suit(&self) -> u8 {
+    pub fn suit(&self) -> u8 {
         self.0 & 0b11
     }
 }
@@ -65,7 +81,7 @@ impl Deck {
         }
     }
 
-    
+
     fn shuffle(&mut self, rng: &mut StdRng) {
         let mut all = std::mem::take(&mut self.live);
         all.extend(std::mem::take(&mut self.used));
