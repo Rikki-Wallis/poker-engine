@@ -1,38 +1,5 @@
-// cards, deck, hand evaluator
-use rand::{RngExt, SeedableRng};
-use rand::rngs::StdRng;
 use std::collections::HashMap;
-
-#[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Rank {
-    Two, Three, Four, Five, Six, Seven, Eight, Nine, Ten, Jack, Queen, King, Ace
-}
-
-#[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Suit {
-    Clubs, Diamonds, Hearts, Spades
-}
-
-#[repr(u8)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    PreDeal,
-    Dealt,
-    PreFlop,
-    Flop,
-    Turn,
-    River
-}
-
-#[repr(u8)]
-#[derive(Copy, Clone, PartialEq, Eq)]
-enum Action {
-    Fold,
-    Bet,
-    Check
-}
+use crate::card::{Card, Rank};
 
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -50,71 +17,132 @@ pub enum HandType {
 }
 
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Card(u8);
-impl Card {
-    fn new(rank: Rank, suit: Suit) -> Self {
-        Self(((rank as u8) << 2) | (suit as u8))
-    }
+fn longest_straight_high(ranks: &[u8]) -> Option<u8> {
+    let mut unique: Vec<u8> = ranks.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
 
-    pub fn rank(&self) -> u8 {
-        self.0 >> 2
-    }
+    // refers to A being lowest card on flush. In this case the high cards is 5
+    let has_wheel = [0u8, 1, 2, 3, 12].iter().all(|r| unique.contains(r));
+    let mut best: Option<u8> = if has_wheel { Some(3) } else { None };
 
-    pub fn suit(&self) -> u8 {
-        self.0 & 0b11
-    }
-}
-
-
-struct Deck {
-    live: Vec<Card>,
-    used: Vec<Card>,
-    seed: u64
-}
-impl Deck {
-    fn new(seed: u64) -> Self {
-        Self {
-            live: (0u8..13).flat_map(|r| (0u8..4).map(move |s| Card(r << 2 | s))).collect(),
-            used: Vec::with_capacity(52),
-            seed: seed
+    let mut run_start = 0usize;
+    for i in 1..unique.len() {
+        if unique[i] != unique[i - 1] + 1 {
+            run_start = i;
+        }
+        if i - run_start + 1 >= 5 {
+            best = Some(unique[i]);
         }
     }
 
+    best
+}
 
-    fn shuffle(&mut self, rng: &mut StdRng) {
-        let mut all = std::mem::take(&mut self.live);
-        all.extend(std::mem::take(&mut self.used));
 
-        while all.len() > 0 {
-            let rand_i = rng.random_range(0..all.len());
-            self.live.push(all.swap_remove(rand_i));
-        }
+pub fn evaluate_hand(hole_cards: Vec::<Card>, community_cards: Vec::<Card>) -> HandType {
+    // Simple implementation for now, hard code checks.
+    // Later use 2 + 2 or Cactus Kev alg
+
+    // TODO: refactor Hand struct into this
+
+    // collate all cards and sort in acsending order
+    let mut all_cards = hole_cards;
+    all_cards.extend(community_cards);
+    all_cards.sort_unstable_by_key(|c| c.rank());
+
+    // counters
+    let mut rank_freq: HashMap<u8, u8> = HashMap::new();
+    let mut suit_freq: HashMap<u8, u8> = HashMap::new();
+
+    // build up counters
+    for card in all_cards.iter() {
+        *rank_freq.entry(card.rank()).or_insert(0) += 1;
+        *suit_freq.entry(card.suit()).or_insert(0) += 1;
     }
 
+    // check for flush
+    let flush_suit = suit_freq.iter().find(|&(_, &freq)| freq >= 5).map(|(&suit, _)| suit);
 
-    fn next_card(&mut self) -> Card {
-        self.live.pop().unwrap()
-    } 
+    // check for straights
+    let all_ranks: Vec<u8> = all_cards.iter().map(|c| c.rank()).collect();
+    let straight_high = longest_straight_high(&all_ranks);
+
+    // check for straight over suited cards - straight/royal flush
+    let straight_flush_high = flush_suit.and_then(|suit| {
+        let flush_ranks: Vec<u8> = all_cards.iter().filter(|c| c.suit() == suit).map(|c| c.rank()).collect();
+        longest_straight_high(&flush_ranks)
+    });
+
+    if let Some(high) = straight_flush_high {
+        if high == Rank::Ace as u8 {
+            return HandType::RoyalFlush
+        } else {
+            return HandType::StraightFlush
+        };
+    }
+
+    // look for quads, trips, pairs
+    let mut quads: Vec<u8> = Vec::new();
+    let mut trips: Vec<u8> = Vec::new();
+    let mut pairs: Vec<u8> = Vec::new();
+    for (&rank, &freq) in rank_freq.iter() {
+        match freq {
+            4 => quads.push(rank),
+            3 => trips.push(rank),
+            2 => pairs.push(rank),
+            _ => {}
+        }
+    }
+    quads.sort_unstable_by(|a, b| b.cmp(a));
+    trips.sort_unstable_by(|a, b| b.cmp(a));
+    pairs.sort_unstable_by(|a, b| b.cmp(a));
+
+    if !quads.is_empty() {
+        return HandType::Quads;
+    }
+
+    // full house, best trip + a pair
+    // edge case if there are two trips and lower trip is used as a pair
+    if !trips.is_empty() && (!pairs.is_empty() || trips.len() >= 2) {
+        return HandType::FullHouse;
+    }
+
+    if flush_suit.is_some() {
+        return HandType::Flush;
+    }
+
+    if straight_high.is_some() {
+        return HandType::Straight;
+    }
+
+    if !trips.is_empty() {
+        return HandType::Trips;
+    }
+
+    if pairs.len() >= 2 {
+        return HandType::TwoPair;
+    }
+
+    if pairs.len() == 1 {
+        return HandType::Pair;
+    }
+
+    // otherwise, high card
+    HandType::HighCard
 }
 
 
-struct Player {
-    name: String,
-    chips: i32,
-}
-
-
-struct Hand {
-    type_: HandType,
-    cards: [Card; 5],
+pub struct Hand {
+    pub type_: HandType,
+    pub cards: [Card; 5],
 }
 impl Hand {
-    
+
     /// Compares two hands of the same 'HandType' and returns the higher one.
     ///
     /// Returns `None` if the hands are exactly tied
-    fn tiebreak<'a>(&'a self, other: &'a Self) -> Option<&'a Self> {
+    pub fn tiebreak<'a>(&'a self, other: &'a Self) -> Option<&'a Self> {
         match self.type_ {
             HandType::RoyalFlush  => {
                 None
@@ -345,6 +373,7 @@ impl Hand {
     }
 }
 
+
 impl PartialEq for Hand {
     fn eq(&self, other: &Self) -> bool {
         if self.type_ == other.type_ {
@@ -365,54 +394,5 @@ impl Ord for Hand {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Compare `type_` first, then fall back to `tiebreakers()` on a tie.
         todo!()
-    }
-}
-
-struct GameRunner {
-    // cards
-    community: Vec::<Card>,
-    muck: Vec::<Card>,
-    burn: Vec::<Card>,
-    deck: Deck,
-
-    // meta data
-    phase: Phase,
-    b_i: i32,
-    sb_i: i32,
-    bb_i: i32,
-    action_i: i32,
-    rng: StdRng,
-
-    // money
-    pot: i32,
-
-    players: Vec::<Player>,
-
-}
-impl GameRunner {
-    fn new(players: Vec::<Player>, seed: u64) -> Self {
-        Self {
-            community: Vec::with_capacity(5),
-            muck: Vec::with_capacity(18), // max 9 players
-            burn: Vec::with_capacity(5),
-            deck: Deck::new(3385958),
-
-            phase: Phase::PreDeal,
-            b_i: 0,
-            sb_i: 0,
-            bb_i: 0,
-            action_i: 0,
-            rng: StdRng::seed_from_u64(seed),
-            
-            pot: 0,
-
-            players: players
-        }
-    }
-
-    fn next_phase(&mut self) {
-        if self.phase == Phase::PreDeal {
-            self.deck.shuffle(&mut self.rng);
-        }
     }
 }
