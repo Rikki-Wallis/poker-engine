@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::card::{Card, Rank};
 
 #[repr(u8)]
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HandType {
     HighCard,
     Pair,
@@ -38,100 +38,6 @@ fn longest_straight_high(ranks: &[u8]) -> Option<u8> {
 
     best
 }
-
-
-pub fn evaluate_hand(hole_cards: Vec::<Card>, community_cards: Vec::<Card>) -> HandType {
-    // Simple implementation for now, hard code checks.
-    // Later use 2 + 2 or Cactus Kev alg
-
-    // TODO: refactor Hand struct into this
-
-    // collate all cards and sort in acsending order
-    let mut all_cards = hole_cards;
-    all_cards.extend(community_cards);
-    all_cards.sort_unstable_by_key(|c| c.rank());
-
-    // counters
-    let mut rank_freq: HashMap<u8, u8> = HashMap::new();
-    let mut suit_freq: HashMap<u8, u8> = HashMap::new();
-
-    // build up counters
-    for card in all_cards.iter() {
-        *rank_freq.entry(card.rank()).or_insert(0) += 1;
-        *suit_freq.entry(card.suit()).or_insert(0) += 1;
-    }
-
-    // check for flush
-    let flush_suit = suit_freq.iter().find(|&(_, &freq)| freq >= 5).map(|(&suit, _)| suit);
-
-    // check for straights
-    let all_ranks: Vec<u8> = all_cards.iter().map(|c| c.rank()).collect();
-    let straight_high = longest_straight_high(&all_ranks);
-
-    // check for straight over suited cards - straight/royal flush
-    let straight_flush_high = flush_suit.and_then(|suit| {
-        let flush_ranks: Vec<u8> = all_cards.iter().filter(|c| c.suit() == suit).map(|c| c.rank()).collect();
-        longest_straight_high(&flush_ranks)
-    });
-
-    if let Some(high) = straight_flush_high {
-        if high == Rank::Ace as u8 {
-            return HandType::RoyalFlush
-        } else {
-            return HandType::StraightFlush
-        };
-    }
-
-    // look for quads, trips, pairs
-    let mut quads: Vec<u8> = Vec::new();
-    let mut trips: Vec<u8> = Vec::new();
-    let mut pairs: Vec<u8> = Vec::new();
-    for (&rank, &freq) in rank_freq.iter() {
-        match freq {
-            4 => quads.push(rank),
-            3 => trips.push(rank),
-            2 => pairs.push(rank),
-            _ => {}
-        }
-    }
-    quads.sort_unstable_by(|a, b| b.cmp(a));
-    trips.sort_unstable_by(|a, b| b.cmp(a));
-    pairs.sort_unstable_by(|a, b| b.cmp(a));
-
-    if !quads.is_empty() {
-        return HandType::Quads;
-    }
-
-    // full house, best trip + a pair
-    // edge case if there are two trips and lower trip is used as a pair
-    if !trips.is_empty() && (!pairs.is_empty() || trips.len() >= 2) {
-        return HandType::FullHouse;
-    }
-
-    if flush_suit.is_some() {
-        return HandType::Flush;
-    }
-
-    if straight_high.is_some() {
-        return HandType::Straight;
-    }
-
-    if !trips.is_empty() {
-        return HandType::Trips;
-    }
-
-    if pairs.len() >= 2 {
-        return HandType::TwoPair;
-    }
-
-    if pairs.len() == 1 {
-        return HandType::Pair;
-    }
-
-    // otherwise, high card
-    HandType::HighCard
-}
-
 
 pub struct Hand {
     pub type_: HandType,
@@ -376,11 +282,7 @@ impl Hand {
 
 impl PartialEq for Hand {
     fn eq(&self, other: &Self) -> bool {
-        if self.type_ == other.type_ {
-            return true
-        }
-
-        false
+        self.cmp(other) == std::cmp::Ordering::Equal
     }
 }
 impl Eq for Hand {}
@@ -392,7 +294,132 @@ impl PartialOrd for Hand {
 }
 impl Ord for Hand {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Compare `type_` first, then fall back to `tiebreakers()` on a tie.
-        todo!()
+        if self.type_ != other.type_ {
+            return self.type_.cmp(&other.type_);
+        }
+
+        match self.tiebreak(other) {
+            Some(winner) if std::ptr::eq(winner, self) => std::cmp::Ordering::Greater,
+            Some(_) => std::cmp::Ordering::Less,
+            None => std::cmp::Ordering::Equal,
+        }
     }
+}
+
+// Returns the best hand given community cards and hole cards
+pub fn best_hand(hole_cards: Vec<Card>, community_cards: Vec<Card>) -> Hand {
+    let mut all_cards = hole_cards;
+    all_cards.extend(community_cards);
+    all_cards.sort_unstable_by_key(|c| c.rank());
+
+    let mut rank_freq: HashMap<u8, u8> = HashMap::new();
+    let mut suit_freq: HashMap<u8, u8> = HashMap::new();
+    for card in all_cards.iter() {
+        *rank_freq.entry(card.rank()).or_insert(0) += 1;
+        *suit_freq.entry(card.suit()).or_insert(0) += 1;
+    }
+
+    let flush_suit = suit_freq.iter().find(|&(_, &freq)| freq >= 5).map(|(&suit, _)| suit);
+
+    let all_ranks: Vec<u8> = all_cards.iter().map(|c| c.rank()).collect();
+    let straight_high = longest_straight_high(&all_ranks);
+
+    let straight_flush_high = flush_suit.and_then(|suit| {
+        let flush_ranks: Vec<u8> = all_cards.iter().filter(|c| c.suit() == suit).map(|c| c.rank()).collect();
+        longest_straight_high(&flush_ranks)
+    });
+
+    // Picks the 5 cards forming the straight ending at `high`, optionally
+    // restricted to a single suit (for straight/royal flushes).
+    let pick_straight_cards = |high: u8, suit: Option<u8>| -> [Card; 5] {
+        let needed_ranks: Vec<u8> = if high == 3 {
+            vec![12, 0, 1, 2, 3] // wheel: A,2,3,4,5 - Five (rank 3) is the high card
+        } else {
+            (high - 4..=high).collect()
+        };
+        let picked: Vec<Card> = needed_ranks.iter()
+            .map(|&r| *all_cards.iter().find(|c| c.rank() == r && suit.map_or(true, |s| c.suit() == s)).unwrap())
+            .collect();
+        picked.try_into().unwrap()
+    };
+
+    // Takes up to `n` cards of a given rank (used for quads/trips/pairs).
+    let cards_of_rank = |rank: u8, n: usize| -> Vec<Card> {
+        all_cards.iter().filter(|c| c.rank() == rank).take(n).cloned().collect()
+    };
+
+    // The `n` highest-rank cards not belonging to any rank in `used_ranks`.
+    let kickers = |used_ranks: &[u8], n: usize| -> Vec<Card> {
+        let mut remaining: Vec<Card> = all_cards.iter().filter(|c| !used_ranks.contains(&c.rank())).cloned().collect();
+        remaining.sort_unstable_by(|a, b| b.rank().cmp(&a.rank()));
+        remaining.into_iter().take(n).collect()
+    };
+
+    if let Some(high) = straight_flush_high {
+        let type_ = if high == Rank::Ace as u8 { HandType::RoyalFlush } else { HandType::StraightFlush };
+        return Hand { type_, cards: pick_straight_cards(high, flush_suit) };
+    }
+
+    let mut quads: Vec<u8> = Vec::new();
+    let mut trips: Vec<u8> = Vec::new();
+    let mut pairs: Vec<u8> = Vec::new();
+    for (&rank, &freq) in rank_freq.iter() {
+        match freq {
+            4 => quads.push(rank),
+            3 => trips.push(rank),
+            2 => pairs.push(rank),
+            _ => {}
+        }
+    }
+    quads.sort_unstable_by(|a, b| b.cmp(a));
+    trips.sort_unstable_by(|a, b| b.cmp(a));
+    pairs.sort_unstable_by(|a, b| b.cmp(a));
+
+    if let Some(&rank) = quads.first() {
+        let mut cards = cards_of_rank(rank, 4);
+        cards.extend(kickers(&[rank], 1));
+        return Hand { type_: HandType::Quads, cards: cards.try_into().unwrap() };
+    }
+
+    // full house: best trip + a pair, or a second trip used as the pair
+    if let Some(&trip_rank) = trips.first() {
+        let pair_rank = if trips.len() >= 2 { Some(trips[1]) } else { pairs.first().copied() };
+        if let Some(pair_rank) = pair_rank {
+            let mut cards = cards_of_rank(trip_rank, 3);
+            cards.extend(cards_of_rank(pair_rank, 2));
+            return Hand { type_: HandType::FullHouse, cards: cards.try_into().unwrap() };
+        }
+    }
+
+    if let Some(suit) = flush_suit {
+        let mut suited: Vec<Card> = all_cards.iter().filter(|c| c.suit() == suit).cloned().collect();
+        suited.sort_unstable_by(|a, b| b.rank().cmp(&a.rank()));
+        let cards: [Card; 5] = suited.into_iter().take(5).collect::<Vec<Card>>().try_into().unwrap();
+        return Hand { type_: HandType::Flush, cards };
+    }
+
+    if let Some(high) = straight_high {
+        return Hand { type_: HandType::Straight, cards: pick_straight_cards(high, None) };
+    }
+
+    if let Some(&rank) = trips.first() {
+        let mut cards = cards_of_rank(rank, 3);
+        cards.extend(kickers(&[rank], 2));
+        return Hand { type_: HandType::Trips, cards: cards.try_into().unwrap() };
+    }
+
+    if pairs.len() >= 2 {
+        let mut cards = cards_of_rank(pairs[0], 2);
+        cards.extend(cards_of_rank(pairs[1], 2));
+        cards.extend(kickers(&[pairs[0], pairs[1]], 1));
+        return Hand { type_: HandType::TwoPair, cards: cards.try_into().unwrap() };
+    }
+
+    if let Some(&rank) = pairs.first() {
+        let mut cards = cards_of_rank(rank, 2);
+        cards.extend(kickers(&[rank], 3));
+        return Hand { type_: HandType::Pair, cards: cards.try_into().unwrap() };
+    }
+
+    Hand { type_: HandType::HighCard, cards: kickers(&[], 5).try_into().unwrap() }
 }

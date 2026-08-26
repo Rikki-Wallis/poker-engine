@@ -34,4 +34,8 @@ impl Deck {
     pub fn next_card(&mut self) -> Card {
         self.live.pop().unwrap()
     }
+
+    pub fn return_cards(&mut self, cards: impl IntoIterator<Item = Card>) {
+        self.used.extend(cards);
+    }
 }

@@ -10,7 +10,7 @@ pub enum Suit {
     Clubs, Diamonds, Hearts, Spades
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Card(u8);
 impl Card {
     pub fn new(rank: Rank, suit: Suit) -> Self {

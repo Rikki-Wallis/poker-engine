@@ -6,6 +6,7 @@ use rand::rngs::StdRng;
 use crate::card::Card;
 use crate::deck::Deck;
 use crate::player::Player;
+use crate::hand::best_hand;
 
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -137,10 +138,30 @@ impl GameRunner {
                 committed_total: 0,
             });
         }
-        self.button_pos = (self.button_pos + 1) % self.table_config.num_players - 1;
-        self.sb_pos = (self.button_pos + 1) % self.table_config.num_players - 1;
-        self.bb_pos = (self.sb_pos + 1) % self.table_config.num_players - 1;
-        self.action_pos = (self.bb_pos + 1) % self.table_config.num_players - 1;
+        self.button_pos = (self.button_pos + 1) % self.table_config.num_players;
+        self.sb_pos = (self.button_pos + 1) % self.table_config.num_players;
+        self.bb_pos = (self.sb_pos + 1) % self.table_config.num_players;
+        self.action_pos = (self.bb_pos + 1) % self.table_config.num_players;
+
+        // post blinds
+        let sb_amount = self.table_config.sb_amount;
+        let bb_amount = self.table_config.bb_amount;
+
+        let sb_id = self.seats[self.sb_pos].id;
+        self.seats[self.sb_pos].money -= sb_amount;
+        self.street_pot += sb_amount;
+        let sb_meta = self.player_meta.get_mut(&sb_id).unwrap();
+        sb_meta.committed_street = sb_amount;
+        sb_meta.committed_total = sb_amount;
+
+        let bb_id = self.seats[self.bb_pos].id;
+        self.seats[self.bb_pos].money -= bb_amount;
+        self.street_pot += bb_amount;
+        let bb_meta = self.player_meta.get_mut(&bb_id).unwrap();
+        bb_meta.committed_street = bb_amount;
+        bb_meta.committed_total = bb_amount;
+
+        self.bet_to_match = bb_amount;
     }
 
 
@@ -158,8 +179,10 @@ impl GameRunner {
         }
 
         // check:
-        //      No one has betted yet this round and it is not preflop
-        if self.bet_to_match == 0 {
+        //      You've already matched the current bet (including the case
+        //      where the bet to match is 0, or you're the big blind facing
+        //      no raise preflop).
+        if committed >= self.bet_to_match {
             legal[1] = Some(ActionType::Check);
         }
 
@@ -186,11 +209,15 @@ impl GameRunner {
         legal
     }
 
-
+    // Sets up a post flop betting round. Excludes preflop which is handled by deal
     pub fn settup_betting_round(&mut self) {
         self.overall_pot += self.street_pot;
         self.street_pot = 0;
-        self.action_pos = (self.button_pos + 1) % self.table_config.num_players - 1;
+        self.bet_to_match = 0;
+        for meta in self.player_meta.values_mut() {
+            meta.committed_street = 0;
+        }
+        self.action_pos = (self.button_pos + 1) % self.table_config.num_players;
     }
 
     pub fn handle_betting_round(&mut self) {
@@ -274,11 +301,65 @@ impl GameRunner {
     }
 
     pub fn handle_showdown(&mut self) {
+        self.overall_pot += self.street_pot;
+        self.street_pot = 0;
 
+        // Single main pot for now - no side pots
+        let mut winners: Vec<i32> = Vec::new();
+        let mut best = None;
+
+        for player in self.seats.iter() {
+            if self.player_meta[&player.id].status == Status::Out {
+                continue;
+            }
+
+            let hole = self.hole_cards[&player.id].to_vec();
+            let hand = best_hand(hole, self.community.clone());
+
+            match &best {
+                None => {
+                    winners = vec![player.id];
+                    best = Some(hand);
+                }
+                
+                Some(current_best) => {
+                    match hand.cmp(current_best) {
+                        std::cmp::Ordering::Greater => {
+                            winners = vec![player.id];
+                            best = Some(hand);
+                        }
+                        std::cmp::Ordering::Equal => {
+                            winners.push(player.id);
+                        }
+                        std::cmp::Ordering::Less => {}
+                    }
+                }
+            }
+        }
+
+        let pot = self.overall_pot;
+        self.overall_pot = 0;
+        if winners.is_empty() {
+            return;
+        }
+        let share = pot / winners.len() as i32;
+        for player in self.seats.iter_mut() {
+            if winners.contains(&player.id) {
+                player.money += share;
+            }
+        }
+    }
+
+    // Burns a card then deals a count amount of cards
+    fn deal_community(&mut self, count: usize) {
+        self.burn.push(self.deck.next_card());
+        for _ in 0..count {
+            self.community.push(self.deck.next_card());
+        }
     }
 
     pub fn play_game(&mut self) {
-        
+
         loop {
             match self.current_round {
                 Round::Start => {
@@ -287,25 +368,27 @@ impl GameRunner {
                 }
 
                 Round::PreFlop => {
-                    self.settup_betting_round();
                     self.handle_betting_round();
                     self.current_round = Round::Flop;
                 }
 
                 Round::Flop => {
                     self.settup_betting_round();
+                    self.deal_community(3);
                     self.handle_betting_round();
                     self.current_round = Round::Turn;
                 }
 
                 Round::Turn => {
                     self.settup_betting_round();
+                    self.deal_community(1);
                     self.handle_betting_round();
                     self.current_round = Round::River;
                 }
 
                 Round::River => {
                     self.settup_betting_round();
+                    self.deal_community(1);
                     self.handle_betting_round();
                     self.current_round = Round::Showdown;
                 }
@@ -316,7 +399,14 @@ impl GameRunner {
                 }
 
                 Round::End => {
-                    // Handle giving each player money and resetting
+                    // Return ards to the deck and clear the board
+                    let dealt_hole_cards: Vec<Card> = self.hole_cards.drain().flat_map(|(_, cards)| cards).collect();
+                    let community = std::mem::take(&mut self.community);
+                    let burn = std::mem::take(&mut self.burn);
+                    self.deck.return_cards(dealt_hole_cards);
+                    self.deck.return_cards(community);
+                    self.deck.return_cards(burn);
+
                     self.current_round = Round::Start;
                 }
             }
